@@ -12,9 +12,9 @@ namespace lab1_SDR
     {
         private readonly PorterStemmer _stemmer;
         private readonly HashSet<string> _stopwords;
+        private readonly Dictionary<string, string> _stemCache = new(StringComparer.Ordinal);
 
-       
-        private static readonly Regex TokenRe = new Regex(@"\p{L}+", RegexOptions.Compiled);
+        private static readonly Regex TokenRe = new Regex(@"\p{L}+", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
         public TextProcessor(PorterStemmer stemmer, HashSet<string> stopwords)
         {
@@ -22,30 +22,28 @@ namespace lab1_SDR
             _stopwords = stopwords;
         }
 
-       public List<string> TokenizeNormalizeStem(string text)
-{
-    if (string.IsNullOrEmpty(text)) return new List<string>();
-
-    var lower = text.ToLowerInvariant();
-    var tokens = new List<string>();
-    var stemCache = new Dictionary<string,string>(256, StringComparer.Ordinal); 
-
-    foreach (Match m in TokenRe.Matches(lower))
-    {
-        var t = m.Value;
-        if (t.Length == 0 || _stopwords.Contains(t)) continue;
-
-        if (!stemCache.TryGetValue(t, out var stem))
+        public IEnumerable<string> TokenizeNormalizeStem(string text)
         {
-            stem = _stemmer.StemWord(t);
-            stemCache[t] = stem;
-        }
-        if (string.IsNullOrWhiteSpace(stem) || _stopwords.Contains(stem)) continue;
+            if (string.IsNullOrEmpty(text)) yield break;
 
-        tokens.Add(stem);
-    }
-    return tokens;
-}
+            var lower = text.ToLowerInvariant();
+
+            foreach (Match m in TokenRe.Matches(lower))
+            {
+                var token = m.Value;
+                if (token.Length == 0 || _stopwords.Contains(token)) continue;
+
+                if (!_stemCache.TryGetValue(token, out var stem))
+                {
+                    stem = _stemmer.StemWord(token);
+                    _stemCache[token] = stem;
+                }
+
+                if (string.IsNullOrWhiteSpace(stem) || _stopwords.Contains(stem)) continue;
+
+                yield return stem;
+            }
+        }
 
     }
 }

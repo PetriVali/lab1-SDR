@@ -12,7 +12,6 @@ namespace lab1_SDR
         public string SourcePath { get; set; } = "";
         public string Content { get; set; } = ""; 
         public List<string> TopicCodes { get; set; } = new();
-        public List<string> Terms { get; set; } = new();
         public string Sparse { get; set; } = "";
     }
 

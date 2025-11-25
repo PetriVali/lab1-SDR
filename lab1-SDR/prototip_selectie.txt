@@ -1,0 +1,102 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace InfoGainDemo
+{
+    class Program
+    {
+        record Row(int[] Attribs, string Cls);
+
+        static readonly List<Row> rows = new()
+        {
+            new Row(new[] { 1, 5, 7, 0, 1, 1 }, "a"),
+            new Row(new[] { 1, 1, 0, 0, 7, 5 }, "b"),
+            new Row(new[] { 0, 0, 1, 7, 1, 0 }, "c"),
+            new Row(new[] { 1, 3, 7, 1, 0, 1 }, "a"),
+            new Row(new[] { 2, 1, 8, 0, 0, 0 }, "a"),
+            new Row(new[] { 0, 0, 0, 0,10, 7 }, "b"),
+            new Row(new[] { 0, 0, 7,10, 7, 0 }, "c"),
+            new Row(new[] { 0, 0, 5, 3, 8, 1 }, "c"),
+            new Row(new[] { 2, 2, 5, 2, 0, 1 }, "a"),
+            new Row(new[] { 0, 1, 0, 1, 9, 5 }, "b"),
+            new Row(new[] { 0, 1, 4, 1, 9, 2 }, "c"),
+            new Row(new[] { 1, 4, 6, 1, 0, 0 }, "a")
+        };
+
+        static readonly string[] ATTR_NAMES =
+            Enumerable.Range(1, 6).Select(i => $"atrib{i}").ToArray();
+
+        static double Entropy(IEnumerable<string> classLabels)
+        {
+            var labels = classLabels.ToList();
+            int n = labels.Count;
+            if (n == 0) return 0.0;
+
+            var counts = labels
+                .GroupBy(c => c)
+                .Select(g => g.Count());
+
+            double entropy = 0.0;
+            foreach (int c in counts)
+            {
+                double p = (double)c / n;
+                entropy -= p * Math.Log(p, 2);
+            }
+            return entropy;
+        }
+
+        static (double IG, Dictionary<int, List<string>> Sv) InfoGainBinaryAttribute(
+            IList<Row> data, int attrIndex, double? baseEntropy = null)
+        {
+            double baseEnt = baseEntropy ?? Entropy(data.Select(r => r.Cls));
+
+            var Sv = new Dictionary<int, List<string>> { [0] = new(), [1] = new() };
+            foreach (var r in data)
+            {
+                int valBin = r.Attribs[attrIndex] > 0 ? 1 : 0;
+                Sv[valBin].Add(r.Cls);
+            }
+
+            int n = data.Count;
+            double condEnt = 0.0;
+            foreach (int v in new[] { 0, 1 })
+            {
+                double weight = (double)Sv[v].Count / n;
+                condEnt += weight * Entropy(Sv[v]);
+            }
+
+            return (baseEnt - condEnt, Sv);
+        }
+        static void Main()
+        {
+            var allLabels = rows.Select(r => r.Cls);
+            double baseEnt = Entropy(allLabels);
+
+            Console.WriteLine($"Entropia întregului set S (12 eșantioane): {baseEnt:F6}\n");
+
+            var results = new List<(string Name, double IG, Dictionary<int, List<string>> Sv)>();
+            for (int j = 0; j < ATTR_NAMES.Length; j++)
+            {
+                var (ig, Sv) = InfoGainBinaryAttribute(rows, j, baseEnt);
+                results.Add((ATTR_NAMES[j], ig, Sv));
+            }
+
+            results.Sort((x, y) => y.IG.CompareTo(x.IG));
+
+            Console.WriteLine("Câștig informațional pe atribute (binarizare: >0 => 1, altfel 0):");
+            foreach (var (name, ig, Sv) in results)
+            {
+                Console.WriteLine($" - {name}: IG={ig:F6}  |  |S_v=0|={Sv[0].Count,2}, |S_v=1|={Sv[1].Count,2}");
+            }
+
+            const double THRESH = 0.5;
+            var selected = results
+                .Where(r => r.IG >= THRESH)
+                .Select(r => r.Name)
+                .ToList();
+
+            Console.WriteLine($"\nAtribute selectate cu prag IG >= {THRESH}: [{string.Join(", ", selected)}]");
+        }
+    }
+}
