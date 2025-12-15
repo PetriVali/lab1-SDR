@@ -13,6 +13,7 @@ namespace lab1_SDR
         public string Content { get; set; } = ""; 
         public List<string> TopicCodes { get; set; } = new();
         public string Sparse { get; set; } = "";
+        public Dictionary<int, double> Vector { get; set; } = new();
     }
 
 }

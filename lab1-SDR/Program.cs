@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -22,6 +23,28 @@ namespace lab1_SDR
             $"vectori_frecvente_NEW.txt");
 
         const int MAX_ATTRIBUTES = 8000;
+        static readonly string QUERY_PATH = @"C:\Users\vali1\suntrek\lab1-SDR\lab1-SDR\Interogari de test pentru setul cu 7083 documente.txt";
+
+        const int TOP_RESULTS = 5;
+
+        enum NormalizationMethod
+        {
+            Nominal,
+            Binary,
+            Logarithmic,
+            SumToOne,
+            TfIdf
+        }
+
+        static readonly NormalizationMethod NORMALIZATION_METHOD = NormalizationMethod.Nominal;
+        enum SimilarityMethod
+        {
+            Cosine,
+            Manhattan,
+            Euclidean
+        }
+
+        static readonly SimilarityMethod SIMILARITY_METHOD = SimilarityMethod.Cosine;
 
         readonly record struct AttributeSelection(
             int[] SelectedIndices,
@@ -71,6 +94,7 @@ namespace lab1_SDR
                 docTermCounts.Add(counts);
             }
 
+            var documentFrequencies = ComputeDocumentFrequencies(docTermCounts, indexToTerm.Count);
             var selection = SelectBestAttributes(
                 docs,
                 docTermCounts,
@@ -78,6 +102,9 @@ namespace lab1_SDR
                 MAX_ATTRIBUTES);
             var selectedIndices = selection.SelectedIndices;
             var remap = selection.Remap;
+            var idfValues = NORMALIZATION_METHOD == NormalizationMethod.TfIdf
+                ? ComputeIdfValues(selectedIndices, documentFrequencies, docs.Count)
+                : Array.Empty<double>();
 
             Console.WriteLine(
                 $"Atribute selectate: {selectedIndices.Length} / {indexToTerm.Count} (MAX={MAX_ATTRIBUTES})");
@@ -90,14 +117,22 @@ namespace lab1_SDR
             if (remap.Count == 0)
             {
                 foreach (var doc in docs)
+                {
                     doc.Sparse = string.Empty;
+                    doc.Vector = new Dictionary<int, double>();
+                }
             }
             else
             {
                 for (int i = 0; i < docs.Count; i++)
                 {
                     var filtered = FilterCounts(docTermCounts[i], remap);
-                    docs[i].Sparse = BuildSparseRow(filtered);
+                    var normalized = NormalizeCounts(
+                        filtered,
+                        NORMALIZATION_METHOD,
+                        idfValues);
+                    docs[i].Vector = normalized;
+                    docs[i].Sparse = BuildSparseRow(normalized);
                 }
             }
 
@@ -118,9 +153,21 @@ namespace lab1_SDR
                     w.WriteLine($"{d.Id} # {d.Sparse} # {topics} # {folder}");
                 }
             }
+
+            if (remap.Count > 0)
+            {
+                RunQueries(
+                    QUERY_PATH,
+                    processor,
+                    docs,
+                    termToIndex,
+                    remap,
+                    NORMALIZATION_METHOD,
+                    idfValues);
+            }
         }
 
-        static string BuildSparseRow(Dictionary<int, int> counts)
+        static string BuildSparseRow(Dictionary<int, double> counts)
         {
             if (counts.Count == 0) return string.Empty;
 
@@ -131,11 +178,105 @@ namespace lab1_SDR
             bool first = true;
             foreach (var entry in entries)
             {
+                double value = entry.Value;
+                if (value == 0) continue;
                 if (!first) sb.Append(' ');
                 first = false;
-                sb.Append(entry.Key).Append(':').Append(entry.Value);
+                sb.Append(entry.Key)
+                    .Append(':')
+                    .Append(value.ToString("0.######", CultureInfo.InvariantCulture));
             }
             return sb.ToString();
+        }
+
+        static Dictionary<int, double> NormalizeCounts(
+            Dictionary<int, int> counts,
+            NormalizationMethod method,
+            IReadOnlyList<double> idfValues)
+        {
+            return method switch
+            {
+                NormalizationMethod.Binary => NormalizeBinary(counts),
+                NormalizationMethod.Logarithmic => NormalizeLogarithmic(counts),
+                NormalizationMethod.SumToOne => NormalizeSumToOne(counts),
+                NormalizationMethod.TfIdf => NormalizeTfIdf(
+                    counts,
+                    idfValues),
+                _ => NormalizeNominal(counts),
+            };
+        }
+
+        static Dictionary<int, double> NormalizeNominal(Dictionary<int, int> counts)
+        {
+            var result = new Dictionary<int, double>(counts.Count);
+            foreach (var kvp in counts)
+            {
+                if (kvp.Value == 0) continue;
+                result[kvp.Key] = kvp.Value;
+            }
+            return result;
+        }
+
+        static Dictionary<int, double> NormalizeBinary(Dictionary<int, int> counts)
+        {
+            var result = new Dictionary<int, double>(counts.Count);
+            foreach (var kvp in counts)
+            {
+                if (kvp.Value > 0)
+                    result[kvp.Key] = 1.0;
+            }
+            return result;
+        }
+
+        static Dictionary<int, double> NormalizeLogarithmic(Dictionary<int, int> counts)
+        {
+            var result = new Dictionary<int, double>(counts.Count);
+            foreach (var kvp in counts)
+            {
+                if (kvp.Value <= 0) continue;
+                result[kvp.Key] = 1.0 + Math.Log10(kvp.Value);
+            }
+            return result;
+        }
+
+        static Dictionary<int, double> NormalizeSumToOne(Dictionary<int, int> counts)
+        {
+            if (counts.Count == 0) return new Dictionary<int, double>();
+
+            double sum = 0.0;
+            foreach (var kvp in counts)
+                sum += kvp.Value;
+            if (sum <= 0) return new Dictionary<int, double>();
+
+            var result = new Dictionary<int, double>(counts.Count);
+            foreach (var kvp in counts)
+            {
+                if (kvp.Value > 0)
+                    result[kvp.Key] = kvp.Value / sum;
+            }
+            return result;
+        }
+
+        static Dictionary<int, double> NormalizeTfIdf(
+            Dictionary<int, int> counts,
+            IReadOnlyList<double> idfValues)
+        {
+            if (counts.Count == 0 || idfValues.Count == 0)
+                return new Dictionary<int, double>();
+
+            var result = new Dictionary<int, double>(counts.Count);
+            foreach (var kvp in counts)
+            {
+                int tf = kvp.Value;
+                if (tf <= 0) continue;
+
+                int newIndex = kvp.Key;
+                if (newIndex < 0 || newIndex >= idfValues.Count) continue;
+
+                double idf = idfValues[newIndex];
+                result[newIndex] = tf * idf;
+            }
+            return result;
         }
 
         static Dictionary<int, int> FilterCounts(
@@ -152,6 +293,45 @@ namespace lab1_SDR
                     filtered[newIdx] = kvp.Value;
             }
             return filtered;
+        }
+
+        static int[] ComputeDocumentFrequencies(
+            IReadOnlyList<Dictionary<int, int>> docTermCounts,
+            int vocabSize)
+        {
+            var frequencies = new int[vocabSize];
+            foreach (var counts in docTermCounts)
+            {
+                if (counts == null || counts.Count == 0) continue;
+
+                foreach (var termIndex in counts.Keys)
+                {
+                    if (termIndex >= 0 && termIndex < vocabSize)
+                        frequencies[termIndex]++;
+                }
+            }
+            return frequencies;
+        }
+
+        static double[] ComputeIdfValues(
+            IReadOnlyList<int> selectedIndices,
+            IReadOnlyList<int> documentFrequencies,
+            int totalDocuments)
+        {
+            if (selectedIndices.Count == 0 || totalDocuments == 0)
+                return Array.Empty<double>();
+
+            var idf = new double[selectedIndices.Count];
+            double numerator = totalDocuments + 1.0;
+            for (int i = 0; i < selectedIndices.Count; i++)
+            {
+                int originalIndex = selectedIndices[i];
+                int df = (originalIndex >= 0 && originalIndex < documentFrequencies.Count)
+                    ? documentFrequencies[originalIndex]
+                    : 0;
+                idf[i] = Math.Log(numerator / (df + 1)) + 1.0;
+            }
+            return idf;
         }
 
         static double TryGetScore(Dictionary<int, double> scores, int termIndex)
@@ -396,6 +576,215 @@ namespace lab1_SDR
             if (p.Contains(Path.DirectorySeparatorChar + "training" + Path.DirectorySeparatorChar) || p.EndsWith($"{Path.DirectorySeparatorChar}training"))
                 return "Training";
             return "Training";
+        }
+
+        static void RunQueries(
+            string queryPath,
+            TextProcessor processor,
+            IReadOnlyList<Doc> docs,
+            Dictionary<string, int> termToIndex,
+            Dictionary<int, int> remap,
+            NormalizationMethod normalization,
+            IReadOnlyList<double> idfValues)
+        {
+            if (!File.Exists(queryPath))
+            {
+                Console.WriteLine($"\nFisierul de interogari nu a fost gasit: {queryPath}");
+                return;
+            }
+
+            var lines = File.ReadAllLines(queryPath, Encoding.UTF8);
+            if (lines.Length == 0)
+            {
+                Console.WriteLine("\nFisierul de interogari este gol.");
+                return;
+            }
+
+            Console.WriteLine($"\n=== Rezultate interogari ({SIMILARITY_METHOD}) ===");
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string queryText = lines[i].Trim();
+                if (queryText.Length == 0)
+                {
+                    Console.WriteLine($"\n[Q{i + 1}] Interogare goala.");
+                    continue;
+                }
+
+                var queryCounts = BuildQueryCounts(queryText, processor, termToIndex, remap);
+                var queryVector = NormalizeCounts(queryCounts, normalization, idfValues);
+                var ranked = ScoreDocuments(queryVector, docs, SIMILARITY_METHOD);
+                PrintQueryResults(i + 1, queryText, ranked);
+            }
+        }
+
+        static Dictionary<int, int> BuildQueryCounts(
+            string queryText,
+            TextProcessor processor,
+            Dictionary<string, int> termToIndex,
+            Dictionary<int, int> remap)
+        {
+            var counts = new Dictionary<int, int>();
+            foreach (var token in processor.TokenizeNormalizeStem(queryText))
+            {
+                if (!termToIndex.TryGetValue(token, out var originalIndex)) continue;
+                if (!remap.TryGetValue(originalIndex, out var mappedIndex)) continue;
+
+                counts[mappedIndex] = counts.TryGetValue(mappedIndex, out var c) ? c + 1 : 1;
+            }
+            return counts;
+        }
+
+        static List<(Doc Doc, double Score)> ScoreDocuments(
+            IReadOnlyDictionary<int, double> queryVector,
+            IReadOnlyList<Doc> docs,
+            SimilarityMethod method)
+        {
+            var results = new List<(Doc Doc, double Score)>();
+            if (queryVector.Count == 0)
+                return results;
+
+            foreach (var doc in docs)
+            {
+                var vector = doc.Vector;
+                if (vector == null || vector.Count == 0) continue;
+
+                double score = ComputeSimilarityScore(queryVector, vector, method);
+                if (score > 0)
+                    results.Add((doc, score));
+            }
+
+            results.Sort((a, b) => b.Score.CompareTo(a.Score));
+            return results;
+        }
+
+        static void PrintQueryResults(
+            int queryIndex,
+            string queryText,
+            List<(Doc Doc, double Score)> ranked)
+        {
+            Console.WriteLine($"\n[Q{queryIndex}] {queryText}");
+            if (ranked.Count == 0)
+            {
+                Console.WriteLine("  (fara rezultate)");
+                return;
+            }
+
+            int limit = Math.Min(TOP_RESULTS, ranked.Count);
+            for (int i = 0; i < limit; i++)
+            {
+                var item = ranked[i];
+                var doc = item.Doc;
+                double score = item.Score;
+                string topics = doc.TopicCodes.Count > 0 ? string.Join(" ", doc.TopicCodes) : "N/A";
+                Console.WriteLine($"  #{i + 1}: {doc.Id}  score={score:F6}  topics={topics}");
+            }
+        }
+
+        static double ComputeSimilarityScore(
+            IReadOnlyDictionary<int, double> queryVector,
+            IReadOnlyDictionary<int, double> docVector,
+            SimilarityMethod method)
+        {
+            return method switch
+            {
+                SimilarityMethod.Cosine => CosineSimilarity(queryVector, docVector),
+                SimilarityMethod.Manhattan => DistanceToSimilarity(ManhattanDistance(queryVector, docVector)),
+                SimilarityMethod.Euclidean => DistanceToSimilarity(EuclideanDistance(queryVector, docVector)),
+                _ => 0.0
+            };
+        }
+
+        static double DistanceToSimilarity(double distance)
+        {
+            if (double.IsNaN(distance) || double.IsInfinity(distance))
+                return 0.0;
+            return 1.0 / (1.0 + Math.Max(distance, 0.0));
+        }
+
+        static double CosineSimilarity(
+            IReadOnlyDictionary<int, double> vectorA,
+            IReadOnlyDictionary<int, double> vectorB)
+        {
+            if (vectorA.Count == 0 || vectorB.Count == 0) return 0.0;
+
+            double dot = DotProduct(vectorA, vectorB);
+            double normA = Math.Sqrt(SumSquares(vectorA));
+            double normB = Math.Sqrt(SumSquares(vectorB));
+
+            if (normA <= 0 || normB <= 0) return 0.0;
+            return dot / (normA * normB);
+        }
+        static double ManhattanDistance(
+            IReadOnlyDictionary<int, double> vectorA,
+            IReadOnlyDictionary<int, double> vectorB)
+        {
+            if (vectorA.Count == 0 && vectorB.Count == 0) return 0.0;
+
+            var small = vectorA.Count <= vectorB.Count ? vectorA : vectorB;
+            var large = ReferenceEquals(small, vectorA) ? vectorB : vectorA;
+
+            double sum = 0.0;
+            foreach (var kvp in small)
+            {
+                double other = large.TryGetValue(kvp.Key, out var value) ? value : 0.0;
+                sum += Math.Abs(kvp.Value - other);
+            }
+            foreach (var kvp in large)
+            {
+                if (small.ContainsKey(kvp.Key)) continue;
+                sum += Math.Abs(kvp.Value);
+            }
+            return sum;
+        }
+
+        static double EuclideanDistance(
+            IReadOnlyDictionary<int, double> vectorA,
+            IReadOnlyDictionary<int, double> vectorB)
+        {
+            if (vectorA.Count == 0 && vectorB.Count == 0) return 0.0;
+
+            var small = vectorA.Count <= vectorB.Count ? vectorA : vectorB;
+            var large = ReferenceEquals(small, vectorA) ? vectorB : vectorA;
+
+            double sumSq = 0.0;
+            foreach (var kvp in small)
+            {
+                double other = large.TryGetValue(kvp.Key, out var value) ? value : 0.0;
+                double diff = kvp.Value - other;
+                sumSq += diff * diff;
+            }
+            foreach (var kvp in large)
+            {
+                if (small.ContainsKey(kvp.Key)) continue;
+                sumSq += kvp.Value * kvp.Value;
+            }
+            return Math.Sqrt(sumSq);
+        }
+
+        static double DotProduct(
+            IReadOnlyDictionary<int, double> vectorA,
+            IReadOnlyDictionary<int, double> vectorB)
+        {
+            if (vectorA.Count == 0 || vectorB.Count == 0) return 0.0;
+
+            var small = vectorA.Count <= vectorB.Count ? vectorA : vectorB;
+            var large = ReferenceEquals(small, vectorA) ? vectorB : vectorA;
+
+            double sum = 0.0;
+            foreach (var kvp in small)
+            {
+                if (large.TryGetValue(kvp.Key, out var value))
+                    sum += kvp.Value * value;
+            }
+            return sum;
+        }
+
+        static double SumSquares(IReadOnlyDictionary<int, double> vector)
+        {
+            double sum = 0.0;
+            foreach (var value in vector.Values)
+                sum += value * value;
+            return sum;
         }
     }
 }
